@@ -130,7 +130,9 @@ class NeRFModel(Model):
         )
         accumulation_fine = self.renderer_accumulation(weights_fine)
         depth_fine = self.renderer_depth(weights_fine, ray_samples_pdf)
-
+        normals = torch.sum(weights_fine * field_outputs_fine[FieldHeadNames.NORMAL], dim=-2)
+        normals = normals / torch.sqrt(torch.clamp(torch.sum(normals * normals, -1, keepdim=True), min=1e-20))
+        normals = (normals * 0.5) + 130
         outputs = {
             "rgb_coarse": rgb_coarse,
             "rgb_fine": rgb_fine,
@@ -138,6 +140,7 @@ class NeRFModel(Model):
             "accumulation_fine": accumulation_fine,
             "depth_coarse": depth_coarse,
             "depth_fine": depth_fine,
+            "normals": normals
         }
         return outputs
 

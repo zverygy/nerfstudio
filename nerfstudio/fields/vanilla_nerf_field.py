@@ -87,19 +87,25 @@ class NeRFField(Field):
             field_head.set_in_dim(self.mlp_head.get_out_dim())  # type: ignore
 
     def get_density(self, ray_samples: RaySamples):
-        if self.use_integrated_encoding:
-            gaussian_samples = ray_samples.frustums.get_gaussian_blob()
-            if self.spatial_distortion is not None:
-                gaussian_samples = self.spatial_distortion(gaussian_samples)
-            encoded_xyz = self.position_encoding(gaussian_samples.mean, covs=gaussian_samples.cov)
-        else:
-            positions = ray_samples.frustums.get_positions()
-            if self.spatial_distortion is not None:
-                positions = self.spatial_distortion(positions)
-            encoded_xyz = self.position_encoding(positions)
-        base_mlp_out = self.mlp_base(encoded_xyz)
-        density = self.field_output_density(base_mlp_out)
-        return density, base_mlp_out
+        with torch.enable_grad():
+            if self.use_integrated_encoding:
+                gaussian_samples = ray_samples.frustums.get_gaussian_blob()
+                if self.spatial_distortion is not None:
+                    gaussian_samples = self.spatial_distortion(gaussian_samples)
+                encoded_xyz = self.position_encoding(gaussian_samples.mean, covs=gaussian_samples.cov)
+            else:
+                positions = ray_samples.frustums.get_positions()
+                if self.spatial_distortion is not None:
+                    positions = self.spatial_distortion(positions)
+                encoded_xyz = self.position_encoding(positions)
+            encoded_xyz.requires_grad_(True)
+            base_mlp_out = self.mlp_base(encoded_xyz)
+            density = self.field_output_density(base_mlp_out)
+            
+            sigma = density
+            x = encoded_xyz
+            normal = - torch.autograd.grad(torch.sum(sigma), x, create_graph=True)[0] # [N, 3]
+        return density, base_mlp_out, normal
 
     def get_outputs(
         self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None
@@ -110,3 +116,16 @@ class NeRFField(Field):
             mlp_out = self.mlp_head(torch.cat([encoded_dir, density_embedding], dim=-1))  # type: ignore
             outputs[field_head.field_head_name] = field_head(mlp_out)
         return outputs
+
+    def forward(self, ray_samples: RaySamples):
+        """Evaluates the field at points along the ray.
+
+        Args:
+            ray_samples: Samples to evaluate field on.
+        """
+        density, density_embedding, normals = self.get_density(ray_samples)
+        field_outputs = self.get_outputs(ray_samples, density_embedding=density_embedding)
+
+        field_outputs[FieldHeadNames.DENSITY] = density  # type: ignore
+        field_outputs[FieldHeadNames.NORMAL] = normals
+        return field_outputs

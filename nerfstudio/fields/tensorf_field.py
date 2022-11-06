@@ -83,12 +83,19 @@ class TensoRFField(Field):
         self.field_output_rgb = RGBFieldHead(in_dim=self.mlp_head.get_out_dim(), activation=nn.Sigmoid())
 
     def get_density(self, ray_samples: RaySamples):
-        positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
-        density = self.density_encoding(positions)
-        density_enc = torch.sum(density, dim=-1)[:, :, None]
-        relu = torch.nn.ReLU()
-        density_enc = relu(density_enc)
-        return density_enc
+        with torch.enable_grad():
+            positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
+            positions.requires_grad_(True)
+
+            density = self.density_encoding(positions)
+            density_enc = torch.sum(density, dim=-1)[:, :, None]
+            relu = torch.nn.ReLU()
+            sigma = density_enc
+            x = positions
+            normal = - torch.autograd.grad(torch.sum(sigma), x, create_graph=True)[0] # [N, 3]
+            density_enc = relu(density_enc)
+
+        return density_enc, normal
 
     def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None) -> TensorType:
         d = ray_samples.frustums.directions
@@ -117,7 +124,7 @@ class TensoRFField(Field):
             base_rgb = bg_color.repeat(ray_samples[:, :, None].shape)
             if mask.any():
                 input_rays = ray_samples[mask, :]
-                density = self.get_density(input_rays)
+                density, normals = self.get_density(input_rays)
                 rgb = self.get_outputs(input_rays, None)
 
                 base_density[mask] = density
@@ -129,7 +136,7 @@ class TensoRFField(Field):
             density = base_density
             rgb = base_rgb
         else:
-            density = self.get_density(ray_samples)
+            density, normals = self.get_density(ray_samples)
             rgb = self.get_outputs(ray_samples, None)
 
-        return {FieldHeadNames.DENSITY: density, FieldHeadNames.RGB: rgb}
+        return {FieldHeadNames.DENSITY: density, FieldHeadNames.RGB: rgb, FieldHeadNames.NORMAL: normals}
